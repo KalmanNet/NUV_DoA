@@ -1,17 +1,19 @@
 import numpy as np
-import tensorflow as tf
-from math import e
-
 
 class Complex_SystemModel(object):
-    def __init__(self, scenario, k, doa= x_dire, freq_values = None):
-        # self.A = A
-        # self.A_T = A.conj().T  
+    def __init__(self, scenario, k, A, freq_values = None):
+        self.A = A
+        self.A_H = A.conj().T  
+
         self.scenario = scenario                                    # Narrowband or Broadband
-        # self.n = A.size()[0]                                      # Number of sensors in element
-        # self.m = A.size()[1]                                      # Number of grid sizes    
-        self.n = n                                           
+
+        self.n = A.size()[0]                                      # Number of sensors in element
+        self.m = A.size()[1]                                      # Number of grids
+        self.resol = 0.05                                         # Resolution after using Spatial Filter
+                                         
         self.k = k                                                  # Number of sources
+        self.l = 100                                                # Number of snapshots
+        
         self.Scenario_define(freq_values)                           # Define parameters    
         self.Create_array()                                         # Define array indicies 
              
