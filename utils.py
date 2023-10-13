@@ -1,10 +1,11 @@
 import numpy as np
 from scipy.signal import find_peaks
+from sklearn.metrics import mean_squared_error
+
 
 # find peaks (known k)
 def peak_finding(u, k, m):
   Spectrum = abs(u)
-  x = np.linspace(0, m, m, endpoint=False)
   DOA_pred,_ = find_peaks(Spectrum)
   DOA_pred = list(DOA_pred)
   DOA_pred.sort(key = lambda x: Spectrum[x], reverse = True)
@@ -14,3 +15,10 @@ def peak_finding(u, k, m):
   DOA.sort()
 
   return DOA
+
+# MSE computation
+def PMSE(pred, DOA):
+  
+    prmse_val = mean_squared_error(pred, DOA)
+        
+    return prmse_val

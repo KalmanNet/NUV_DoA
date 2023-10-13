@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from math import e
+import math
 
 class DataGenerator:
     def __init__(self, k, gap, sample, n, x_var, mean_c, r2, l):
@@ -22,6 +22,15 @@ class DataGenerator:
 
             if np.all(difference_between_angles > self.gap) and np.all(difference_between_angles < (180 - self.gap)):
                 return doa
+    
+
+    def ULA_narrow (n, m):
+        A = torch.zeros(n, m, dtype=torch.cdouble).cpu()
+        for i in range(n):
+            for s in range(m):
+                x = -1j * i * np.pi * np.sin(s * (np.pi)/m - np.pi/2)
+                A[i,s] = math.e ** x
+        return A
 
     def steeringmatrix(self, doa):
         """Generates samples of steering matrices given DOA."""
@@ -33,7 +42,7 @@ class DataGenerator:
             for i in range(self.n):
                 for s in range(self.k):
                     x = -1j * i * np.pi * np.sin(sig_direc[s])
-                    STM_A[j][i][s] = e ** x
+                    STM_A[j][i][s] = math.e ** x
 
         return STM_A
 

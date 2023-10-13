@@ -7,35 +7,18 @@
 import numpy as np
 import torch
 import math
-from sklearn.metrics import mean_squared_error
-from itertools import permutations
 import time
 
 from system_model import Complex_SystemModel
 from NUV_SSR import NUV_SSR
-from peak_finding import peak_finding
+from utils import peak_finding
+from utils import PMSE
 from Data_generation import DataGenerator
 from Data_generation import generate_experiment_data
 
-def ULA_narrow (n, m):
-  A = torch.zeros(n, m, dtype=torch.cdouble).cpu()
-  for i in range(n):
-    for s in range(m):
-      x = -1j * i * np.pi * np.sin(s * (np.pi)/m - np.pi/2)
-      A[i,s] = math.e ** x
-  return A
-
-def PMSE(pred, DOA):
-        prmse_list = []
-        for p in list(permutations(pred, len(pred))):
-            p = np.array(p)
-            DOA = np.array(DOA)
-            prmse_val = mean_squared_error(pred, DOA)
-            prmse_list.append(prmse_val)
-        return np.min(prmse_list)
   
 #### initialization####
-k = 1  # number of sources
+k = 3 # number of sources
 n = 16 # number of ULA elements
 m=360  # number of grids  
 gap = 15
@@ -44,12 +27,15 @@ x_var = 0.5
 mean_c = 2
 r2 = 1e-1
 l = 100
-A = ULA_narrow(n,m)                           #steering matrix given the true direction x_dire
-ss_model = Complex_SystemModel("Narrowband", k, A)
 
 # Generate data
-generator = DataGenerator(k, gap, samples, n, x_var, mean_c, r2, l)
-x_dire, x_true, y_train = generate_experiment_data(generator)
+# generator = DataGenerator(k, gap, samples, n, x_var, mean_c, r2, l)
+# x_dire, x_true, y_train = generate_experiment_data(generator)
+# torch.save([x_dire, x_true, y_train], 'data/Vanilla_m=360_k=3.pt')
+[x_dire, x_true, y_train] = torch.load('data/Vanilla_m=360_k=3.pt')
+A = DataGenerator.ULA_narrow(n,m)                           #steering matrix given the true direction x_dire
+ss_model = Complex_SystemModel("Narrowband", k, A)
+
 
 y_mean = torch.zeros(samples, ss_model.n, 1, dtype = torch.cdouble) # generate y_mean by averaging l snapshots for each sample
 for i in range(samples):
@@ -74,7 +60,7 @@ for r_tuning in r_t:
     # find peaks
     theta[i] = peak_finding(x_pred[i], k, m)
     # compute MSE
-    MSE[i] = PMSE([theta[i]], [x_dire[i]]) # mean square error for each sample
+    MSE[i] = PMSE(theta[i], x_dire[i]) # mean square error for each sample
     
     print('MSE for {}th sample = {}'.format(i, MSE[i]))
     print('------------------------------------------')
@@ -110,7 +96,7 @@ ax.plot(y_c, x_c, marker = '*')
 
 # plt.plot(0, x_c[50], "o")
 ax.set_title('M = {}'.format(len(x_c) ))
-plt.savefig('plot/Vanilla_m=360_snr_high.eps', format='eps')
+plt.savefig('plot/Vanilla_m=360_snr_high.png', format='png')
 
 
 
