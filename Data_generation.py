@@ -1,92 +1,136 @@
-import numpy as np
 import torch
-import math
 
 class DataGenerator:
-    def __init__(self, k, gap, sample, n, x_var, mean_c, r2, l):
-        self.k = k                                                              # number of sources
-        self.gap = gap                                                          # minimum gap between each source directions
-        self.sample = sample                                                  
-        self.n = n                                                              # number of sensor arrays
-        self.x_var = x_var                                                      # variance of non-coherent Gaussian source signal
-        self.mean_c = mean_c                                                    # constant mean of non-coherent Gaussian source signal
-        self.r2 = r2                                                            # variance of complex AWGN
-        self.l = l                                                              # number of snapshots
+    def __init__(self, args):
+        self.args = args
+        # Set device
+        if args.use_cuda:
+            self.device = torch.device('cuda')
+        else:
+            self.device = torch.device('cpu')
+        # variance of complex AWGN
+        self.r2 = torch.tensor(args.r2) 
 
     def doa_generator(self):
-        """Generates k DOAs with a specified gap."""
-        while True:
-            doa = np.round(np.random.rand(self.k) * 150, decimals=2) - 75
-            doa.sort()
-            difference_between_angles = np.diff(doa)
+        """
+        Output DoA [sample, k] matrix, 
+        where each row is a sample of k DOAs,
+        sorted in ascending order.
+        """
+        # Generate a tensor of angles from -doa_gt_range to doa_generate_range with doa_gt_increment increments
+        all_angles = torch.arange(-self.args.doa_gt_range, self.args.doa_gt_range + self.args.doa_gt_increment, self.args.doa_gt_increment).to(self.device)
+        x_dire = torch.zeros(self.args.sample, self.args.k, device=self.device)
+        for sample_index in range(self.args.sample):
+            """Generates k DOAs with a specified gap."""
+            # Shuffle the angles
+            shuffled_angles = all_angles[torch.randperm(all_angles.size(0))]
 
-            if np.all(difference_between_angles > self.gap) and np.all(difference_between_angles < (180 - self.gap)):
-                return doa
+            selected_angles = []
+            for angle in shuffled_angles:
+                if all(torch.abs(angle - torch.tensor(selected_angles)) >= self.args.gap):
+                    selected_angles.append(angle.item())
+                    if len(selected_angles) == self.args.k:
+                        break
+            selected_angles.sort()
+            x_dire[sample_index] = torch.tensor(selected_angles)
+
+        return x_dire
     
 
-    def ULA_narrow (n, m):
-        A = torch.zeros(n, m, dtype=torch.cdouble).cpu()
-        for i in range(n):
-            for s in range(m):
-                x = -1j * i * np.pi * np.sin(s * (np.pi)/m - np.pi/2)
-                A[i,s] = math.e ** x
+    def ULA_narrow(self):
+        A = torch.zeros(self.args.n, self.args.m, dtype=torch.cfloat, device=self.device)
+
+        # Generating i and s values as tensors
+        i_values = torch.arange(self.args.n, dtype=torch.float32, device=self.device)
+        s_values = torch.arange(self.args.m, dtype=torch.float32, device=self.device)
+
+        # Calculate the angle matrix using broadcasting
+        angles = torch.sin(s_values * (torch.pi / self.args.m) - torch.pi / 2)
+        x = -1j * torch.pi * torch.outer(i_values, angles)
+
+        # Compute the exponential
+        A = torch.exp(x)
+
         return A
+    
+    #### generate dictionary matrices for each little windows ####
+    def ULA_refine(self, centers, half_window_size): 
+        
+        center_num = len(centers) # number of centers    
+        A = torch.zeros(center_num, self.args.n, self.args.m_SF, dtype = torch.cfloat, device=self.device) # dictionary matrices
+        A_H = torch.zeros(center_num, self.args.m_SF, self.args.n, dtype = torch.cfloat, device=self.device) # transpose of dictionary matrices
+        
+        for ct in range(center_num):
+            # b1 and b2 are the left and right boundaries of the window  
+            b1 = centers[ct] - half_window_size
+            b2 = centers[ct] + half_window_size
+            b1 = b1 * torch.pi/180 # convert deg to rad
+            b2 = b2 * torch.pi/180 # convert deg to rad
+            angles = torch.linspace(b1, b2, self.args.m_SF, device=self.device)
+            angles = torch.sin(angles)
+            i_values = torch.arange(self.args.n, dtype=torch.float32, device=self.device)
+            x = -1j * torch.pi * torch.outer(i_values, angles)
+            # Compute the exponential
+            A[ct, :, :] = torch.exp(x)
+            # Compute the conjugate transpose
+            A_H[ct, :, :] = A[ct, :, :].conj().T
+        
+        return A, A_H
+
 
     def steeringmatrix(self, doa):
-        """Generates samples of steering matrices given DOA."""
-        STM_A = torch.zeros(self.sample, self.n, self.k, dtype=torch.cdouble)
+        """
+        Generates samples of steering matrices given DOA.
+        input: doa, tensor of size [sample, k].
+        output: steering matrix, tensor of size [sample, n, k].
+        """
+        STM_A = torch.zeros(self.args.sample, self.args.n, self.args.k, dtype=torch.cfloat, device=self.device)
 
-        for j in range(self.sample):
-            sig_direc = np.deg2rad(doa[j])
+        for sample_index in range(self.args.sample):
+            s_values = torch.deg2rad(doa[sample_index]).to(self.device)
+            i_values = torch.arange(self.args.n, dtype=torch.float32, device=self.device)
 
-            for i in range(self.n):
-                for s in range(self.k):
-                    x = -1j * i * np.pi * np.sin(sig_direc[s])
-                    STM_A[j][i][s] = math.e ** x
+            angles = torch.sin(s_values)
+            x = -1j * torch.pi * torch.outer(i_values, angles)
+
+            STM_A[sample_index] = torch.exp(x)
 
         return STM_A
 
     def nonco_signal_generator(self):
         """Generates non-coherent source signals."""
-        x = np.sqrt(self.x_var / 2) * (np.random.randn(1, self.k) + 1j * np.random.randn(1, self.k))
-        return torch.tensor(x)
+        
+        # Generate real and imaginary parts using torch.randn
+        real_part = torch.randn(self.args.sample, self.args.l, self.args.k, 1, dtype=torch.float32, device=self.device)
+        imag_part = torch.randn(self.args.sample, self.args.l, self.args.k, 1, dtype=torch.float32, device=self.device)
+        
+        # Scale by the factor derived from variance
+        scale_factor = torch.sqrt(torch.tensor(self.args.x_var / 2, dtype=torch.float32))
+        
+        x = scale_factor * (real_part + 1j * imag_part)
+
+        x = x + self.args.mean_c
+        
+        return x
 
 
-def generate_experiment_data(generator):
-    """Experiment data generation using the DataGenerator methods."""
-    x_dire = [generator.doa_generator() for _ in range(generator.sample)]
-    
-    STM_A = generator.steeringmatrix(x_dire)
+    def generate_experiment_data(self):
+        """Experiment data generation."""
+        x_dire = self.doa_generator()
+        
+        STM_A = self.steeringmatrix(x_dire)
 
-    x_mean = generator.mean_c * torch.ones(generator.k)
-    x_true = torch.zeros(generator.sample, l, generator.k, 1, dtype=torch.cdouble)
-    
-    for j in range(generator.sample):
-        for t in range(l):
-            x_true[j, t, :, 0] = generator.nonco_signal_generator() + x_mean
+        x_true = self.nonco_signal_generator()
+        
+        y_train = torch.zeros(self.args.sample, self.args.l, self.args.n, 1, dtype=torch.cfloat)
+        
+        for j in range(self.args.sample):
+            for t in range(self.args.l):
+                er1 = torch.normal(mean=0.0, std=torch.sqrt(self.r2 / 2), size=(self.args.n,))
+                er2 = torch.normal(mean=0.0, std=torch.sqrt(self.r2 / 2), size=(self.args.n,))
 
-    y_train = torch.zeros(generator.sample, l, generator.n, 1, dtype=torch.cdouble)
-    
-    for j in range(generator.sample):
-        for t in range(l):
-            er1 = torch.tensor(np.random.normal(0, generator.r2 / 2, generator.n))
-            er2 = torch.tensor(np.random.normal(0, generator.r2 / 2, generator.n))
-            y_train[j, t, :, 0] = STM_A[j].matmul(x_true[j, t, :, 0]) + er1 + er2 * 1j
-            
-    return x_dire, x_true, y_train
+                y_train[j, t, :, 0] = STM_A[j].matmul(x_true[j, t, :, 0]) + er1 + er2 * 1j
+                
+        return x_dire, x_true, y_train
 
 
-# Initialization
-k = 1
-gap = 15
-sample = 1
-n = 16
-x_var = 0.5
-mean_c = 2
-r2 = 1e-1
-l = 100
-
-# Generate data
-generator = DataGenerator(k, gap, sample, n, x_var, mean_c, r2, l)
-x_dire, x_true, y_train = generate_experiment_data(generator)
-# print(x_dire)

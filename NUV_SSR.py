@@ -1,69 +1,99 @@
 import torch
-import numpy as np
 
+def NUV_SSR(args, A, y, r):
+   """
+   1. quantize the signal range into m equidistant grid cells
+      so each cell length is theta/m
 
-def NUV_SSR(ss_model, y, r, max_iterations, convergence_threshold):
-    """
-    1. quantize the azimuth into m equidistant grid cells
-       so each cell length is theta/m
+   2. apply EM to estimate to posteriori distribution of decision vector q (size m)
+      i.e. mean and variance
+   """
+   # Set up parameters
+   A_H = A.conj().T
+   m = args.m
+   n = args.n
+   l = args.l
+   max_iterations = args.max_iterations
+   convergence_threshold = args.convergence_threshold
 
-    2. apply EM to estimate to posteriori distribution of decision vector q (size m)
-       i.e. mean and variance
-    """
+   ### 1. Initial Guess ###
+   q = args.q_init * torch.ones(2, m, dtype=torch.cfloat, device=A.device)
+
+   ### 2. EM Algorithm ###
+   iterations = max_iterations  
+
+   for it in range(max_iterations):
+      # 2a. Precision Matrix
+      q[0] = q[1]
    
-    A = ss_model.A
-    A_H = ss_model.A_H
-    m = ss_model.m
-    n = ss_model.n
-    l = ss_model.l
+      W_inv =  A @ torch.diag(torch.square(q[0])) @ A_H 
+      W_inv = W_inv + (r/l) * torch.eye(n, dtype = torch.cfloat, device = A.device)          
+      
+      W = torch.linalg.inv(W_inv)
 
-    delta = [] # delta records the difference of norm of q between each iteration it+1 and it
+      # 2b. Gaussian Posteriori Distribution
+      mean = torch.abs(torch.diag(torch.square(q[0])) @ A_H @ W @ y )
+      variance =  torch.abs(torch.pow(q[0], 2) -  torch.diag(torch.pow(q[0], 4)) @ torch.diagonal(A_H @ W @ A) )
+      q[1] = torch.sqrt(torch.square(mean) + variance)
+      
+      if torch.norm(q[1] - q[0]) < convergence_threshold:   # stopping criteria
+         iterations = it
+         break
+   
 
-    ### 1. Initial Guess ###
-    q = 0.01 * torch.ones(max_iterations + 2, m, dtype=torch.cdouble).cpu() 
+   ### 3. MAP Estimator of the sparse signal###
+   u = torch.diag(torch.square(q[1])) @ A_H @ W @ y
+
+   return [u, iterations]
 
 
-    ### 2. EM Algorithm ###
-    iterations = max_iterations
+def NUV_SSR_batched(args, A, A_H, y, r):   
+   # Set up parameters
+   m = args.m
+   n = args.n
+   l = args.l
+   max_iterations = args.max_iterations
+   convergence_threshold = args.convergence_threshold
 
-    for it in range(max_iterations):
-        # 2a. Precision Matrix
-        q[it] = q[it]
+   samples_run = args.sample
 
-        torch.diag(torch.square(q[it]))
+   id = torch.eye(n, dtype=torch.cfloat, device=A.device)
+   id = id.reshape((1, n, n))
+   id_batch = id.repeat(samples_run, 1, 1)
 
-        W_inv = torch.zeros(n, n, dtype=torch.cdouble)
-        W_inv =  A @ torch.diag(torch.square(q[it])) @ A_H 
+   # 1. Initial Guess
+   q = args.q_init * torch.ones(samples_run, 2, m, dtype=torch.cfloat, device=A.device)
 
-        W_inv = W_inv + (r/l) * torch.eye(ss_model.n, dtype = torch.cdouble)          
-        W = torch.zeros(n, n, dtype=torch.cdouble)
-        W = torch.linalg.inv(W_inv)
+   # 2. EM Algorithm
+   iterations = max_iterations
 
-        # 2b. Gaussian Posteriori Distribution
-        mean = torch.zeros(m, dtype=torch.cdouble) 
-        variance = torch.zeros(m, dtype=torch.cdouble)
+   for it in range(max_iterations):
+      q[:, 0, :] = q[:, 1, :]
+      
+      diag_squared_q = torch.diag_embed(torch.square(q[:, 0, :]), offset=0, dim1=-2, dim2=-1)
+      W_inv = A @ diag_squared_q @ A_H
+      W_inv = W_inv + (r / l) * id_batch
 
-        mean = abs(torch.diag(torch.square(q[it])) @ A_H @ W @ y )
-        variance =  abs(torch.pow(q[it], 2) -  torch.diag(torch.pow(q[it], 4)) @ torch.diagonal(A_H @ W @ A) )
-        q[it+1] = torch.sqrt(torch.square(mean) + variance)
-        
-        if torch.norm(q[it + 1] - q[it]) < convergence_threshold:   # stopping criteria
-            q[-1] = q[it + 1]
+      W = torch.linalg.inv(W_inv)
+
+      mean = torch.abs(diag_squared_q @ A_H @ W @ y)
+
+      M1 = torch.diag_embed(torch.pow(q[:, 0, :], 4), offset=0, dim1=-2, dim2=-1)
+      M2 = torch.diagonal(A_H @ W @ A, dim1=-2, dim2=-1)
+      M2 = M2.unsqueeze(-1)
+      
+      variance = torch.abs(torch.pow(q[:, 0, :], 2) - torch.squeeze(torch.bmm(M1, M2),2))
+
+      q[:, 1, :] = torch.sqrt(torch.squeeze(torch.square(mean),2) + variance)
+
+      if max(torch.linalg.norm(q[:, 0, :] - q[:, 1, :], dim=1)) < convergence_threshold:
             iterations = it
             break
-        else:
-            delta.append(torch.norm(q[it + 1] - q[it]))
-        
 
-        q[-1]=q[it+1]
-
-
-    ### 3. MAP Estimator of the sparse signal###
-
-    u = torch.zeros(l, ss_model.m, dtype = torch.cdouble)
-    u = torch.diag(torch.square(q[-1])) @ A_H @ W @ y
-
-    
-    return [abs(q[-1]), abs(u), iterations, delta]
+   # 3. MAP Estimator
+   U = torch.diag_embed(torch.square(q[:, -1, :]), offset=0, dim1=-2, dim2=-1) @ A_H @ W @ y
+   U = torch.squeeze(U,2)
+   
+   return [U, iterations]
 
 

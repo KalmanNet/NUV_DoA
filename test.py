@@ -2,174 +2,175 @@
 ################### simulating NUV-SSR ###################
 ##########################################################
 
-#### generate dictionary matrix of size nxm ####
-
-import numpy as np
 import torch
 import math
 import time
 
-from system_model import Complex_SystemModel
-from NUV_SSR import NUV_SSR
-from utils import peak_finding
-from utils import PMSE
+from NUV_SSR import NUV_SSR, NUV_SSR_batched
+
+from simulations import utils
+from simulations import config
 from Data_generation import DataGenerator
-from Data_generation import generate_experiment_data
-
-  
-#### initialization####
-k = 3 # number of sources
-n = 16 # number of ULA elements
-m=360  # number of grids  
-gap = 15
-samples = 100                                                #number of samples
-x_var = 0.5
-mean_c = 2
-r2 = 1e-1
-l = 100
-
-# Generate data
-# generator = DataGenerator(k, gap, samples, n, x_var, mean_c, r2, l)
-# x_dire, x_true, y_train = generate_experiment_data(generator)
-# torch.save([x_dire, x_true, y_train], 'data/Vanilla_m=360_k=3.pt')
-[x_dire, x_true, y_train] = torch.load('data/Vanilla_m=360_k=3.pt')
-A = DataGenerator.ULA_narrow(n,m)                           #steering matrix given the true direction x_dire
-ss_model = Complex_SystemModel("Narrowband", k, A)
 
 
-y_mean = torch.zeros(samples, ss_model.n, 1, dtype = torch.cdouble) # generate y_mean by averaging l snapshots for each sample
-for i in range(samples):
-  for j in range(ss_model.n):
-    for s in range(l):
-      y_mean[i, j, 0] += y_train[i, s, j, 0] / l
+#### initialization ####
+args = config.general_settings()
+# GPU or CPU
+if args.use_cuda:
+   if torch.cuda.is_available():
+      device = torch.device('cuda')
+      print("Using GPU")
+   else:
+      raise Exception("No GPU found, please set args.use_cuda = False")
+else:
+    device = torch.device('cpu')
+    print("Using CPU")
+# number of samples
+samples_run = args.sample
+# searching the best performed tuning parameter r (std of observation noise)
+r_t = [1e-0]
 
-#### estimation ####
-samples_run = samples
-r_t = [1e-0]                                  # searching the best performed tuning parameter
+#### Generate data ####
+generator = DataGenerator(args)
+# # x_dire, x_true, y_train = generator.generate_experiment_data()
+# # torch.save([x_dire, x_true, y_train], 'data/Vanilla_m=360_k=3_sample=10.pt')
+[x_dire, x_true, y_train] = torch.load('data/Vanilla_m=360_k=3_sample=10.pt', map_location=device)
+
+A = generator.ULA_narrow().to(device) #steering matrix given the true direction x_dire
+A_batched = A.reshape(1, args.n, args.m).repeat(samples_run, 1, 1)
+A_H_batched = A_batched.transpose(1, 2).conj() 
+
+y_mean = y_train.mean(dim=1) # generate y_mean by averaging l snapshots for each sample
+
+# #### estimation ####
+# Original version
 start = time.time()
 for r_tuning in r_t:
-  print('======================================')
-  print('r_tuning = {}'.format(r_tuning))
-  x_pred = [0] * samples_run
-  q_pred = [0] * samples_run
-  theta = [0] * samples
-  MSE = [0] * samples_run 
-  for i in range(samples_run):
-    # NUV-SSR
-    [q_pred[i], x_pred[i], iterations, deltas] = NUV_SSR(ss_model, y_mean[i, :, 0], r=r_tuning, max_iterations=10000,  convergence_threshold=4e-4)
-    # find peaks
-    theta[i] = peak_finding(x_pred[i], k, m)
-    # compute MSE
-    MSE[i] = PMSE(theta[i], x_dire[i]) # mean square error for each sample
-    
-    print('MSE for {}th sample = {}'.format(i, MSE[i]))
-    print('------------------------------------------')
-  MSE_dB = 10 * (math.log10(np.mean(MSE)))
-  print('averaged MSE in dB = {}'.format(MSE_dB))
-  MSE_linear = math.sqrt(np.mean(MSE))
-  print('averaged RMSE in linear = {}'.format(MSE_linear))
-  print('--------------------------------------------')
+    print('======================================')
+    print('r_tuning = {}'.format(r_tuning))
+    x_pred = [0] * samples_run
+    theta = [0] * samples_run
+    MSE = [0] * samples_run 
+    start1 = time.time()
+    for i in range(samples_run):
+        # NUV-SSR
+        [x_pred[i], iterations] = NUV_SSR(args, A, y_mean[i, :, 0], r=r_tuning)
+    end1 = time.time()
+    t1 = end1 - start1
+    # Print Run Time
+    print("NUV-SSR origin Run Time:", t1)
+
+    for i in range(samples_run):
+        # find peaks
+        peak_indices = utils.peak_finding(x_pred[i], args.k)
+        # convert to DoA
+        theta[i] = utils.convert_to_doa(peak_indices, args.m)  
+        # compute MSE
+        MSE[i] = utils.PMSE(theta[i], x_dire[i]) # mean square error for each sample     
+        print('MSE for {}th sample = {}'.format(i, MSE[i]))
+        print('------------------------------------------') 
+  
+    mean_MSE = sum(MSE) / len(MSE)
+    MSE_dB = 10 * (math.log10(mean_MSE))
+    print('averaged MSE in dB = {}'.format(MSE_dB))
+    MSE_linear = math.sqrt(mean_MSE)
+    print('averaged RMSE in linear = {}'.format(MSE_linear))
+    print('--------------------------------------------')
 
 end = time.time()
 t = end - start
 # Print Run Time
-print("Run Time:", t)
+print("Total Run Time:", t)
 
-SNR = 10*math.log10((x_var + mean_c) / r2)
-print('SNR = {}'.format(SNR))
+# batched version
+start = time.time()
+for r_tuning in r_t:
+    print('======================================')
+    print('r_tuning = {}'.format(r_tuning))
+    x_pred = [0] * samples_run
+    theta = [0] * samples_run
+    MSE = [0] * samples_run 
+    start1 = time.time()   
+    # NUV-SSR batched
+    [x_pred, iterations] = NUV_SSR_batched(args, A_batched, A_H_batched, y_mean, r_tuning)
+    end1 = time.time()
+    t1 = end1 - start1
+    # Print Run Time
+    print("NUV-SSR origin Run Time:", t1)
+
+    for i in range(samples_run):
+        # find peaks
+        peak_indices = utils.peak_finding(x_pred[i], args.k)
+        # convert to DoA
+        theta[i] = utils.convert_to_doa(peak_indices, args.m)  
+        # compute MSE
+        MSE[i] = utils.PMSE(theta[i], x_dire[i]) # mean square error for each sample     
+        print('MSE for {}th sample = {}'.format(i, MSE[i]))
+        print('------------------------------------------') 
+  
+    mean_MSE = sum(MSE) / len(MSE)
+    MSE_dB = 10 * (math.log10(mean_MSE))
+    print('averaged MSE in dB = {}'.format(MSE_dB))
+    MSE_linear = math.sqrt(mean_MSE)
+    print('averaged RMSE in linear = {}'.format(MSE_linear))
+    print('--------------------------------------------')
+
+end = time.time()
+t = end - start
+# Print Run Time
+print("Total Run Time:", t)
+
+# SNR = 10*math.log10((args.x_var + args.mean_c) / args.r2)
+# print('SNR = {}'.format(SNR))
 
 #### plotting ####
-from scipy.signal import argrelextrema
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-# fig,axs = plt.subplots(179)
+# import matplotlib.pyplot as plt
+# import numpy as np
+# # fig,axs = plt.subplots(179)
+# p = 0
+# fig,ax = plt.subplots(figsize=(5, 3))
 
+# x_c = x_pred[p].cpu()
+# y_c = np.linspace(-90, 90, len(x_c), endpoint=False)
+#   # y_c = np.linspace(-0.5, 0.5, len(x_c), endpoint=False)
+# ax.plot(y_c, x_c, marker = '*')
 
-p = 0
-
-fig,ax = plt.subplots(figsize=(5, 3))
-
-x_c = x_pred[p].cpu()
-y_c = np.linspace(-90, 90, len(x_c), endpoint=False)
-  # y_c = np.linspace(-0.5, 0.5, len(x_c), endpoint=False)
-ax.plot(y_c, x_c, marker = '*')
-
-# plt.plot(0, x_c[50], "o")
-ax.set_title('M = {}'.format(len(x_c) ))
-plt.savefig('plot/Vanilla_m=360_snr_high.png', format='png')
+# # plt.plot(0, x_c[50], "o")
+# ax.set_title('M = {}'.format(len(x_c) ))
+# plt.savefig('plot/Vanilla_m=360_snr_high.png', format='png')
 
 
 
 ##########################################################
 ################### simulating NUV-DoA ###################
 ##########################################################
+#### initialization ####
+# args.resol = 0.05 # resolution of spatial filter
+# args.q_init = 0.1 # initial guess of q
+# centers = torch.linspace(args.B1, args.B2, int((args.B2 - args.B1) / args.resol + 1)).to(device) # centers of all windows
+# center_num = len(centers) # number of centers
+# half_window_size = args.resol * 50 # each window covers the interval [center - half_window_size, center + half_window_size]
+# args.m_SF = int((half_window_size * 2)/args.resol)+1  # number of steering vectors of each SF window, here m_SF=101
 
-#### generate dictionary matrices for each little windows ####
-# def ULA_refine (self, n, resol, m, b1, b2):                                               #[b1, b2] are the grid boundary for each individual windows
-#         angles = np.linspace( b1 * np.pi/180, b2 * np.pi/180, m, endpoint=True)
-#         A = torch.zeros(n, m, dtype=torch.cdouble)
-   
-#         for i in range(n):
-#           for s in range(m):
-#              x = -1j * i * np.pi * np.sin(angles[s])
-#              A[i,s] = e ** x
-#         return [A]
-
-# #### initialization ####
-
-# ss_model = Complex_SystemModel("Narrowband", n, k)
-
-# estimator = Complex_NUVEstimator_k(ss_model)
-
-# print(y_train.shape)
-# y_mean = torch.zeros(samples, n, 1, dtype = torch.cdouble).to('cuda')
-# for i in range(samples):
-#   for j in range(n):
-#     for s in range(l):
-#       y_mean[i, j, 0] += y_train[i, s, j, 0] / l
+# #### Generate data ####
+# A, A_H = generator.ULA_refine(centers, half_window_size) # generate dictionary matrices for each little window
+# A = A.to(device)
+# A_H = A_H.to(device)
 
 # from sklearn.metrics import mean_squared_error
 # from itertools import permutations
 
 
-
-# B1 = -89                                                                        # B1 and B2 are left and right boundary centers of all windows
-# B2 = 89
-# resol = 0.05                                                                    # resolution
-# centers = np.linspace( B1, B2, int((B2-B1)/resol+1), endpoint=True)             # all the center azimuths of all the windows
-# # print(centers)
-# center_size = len(centers)                                                      # number of centers
-# window_size = resol * 50                                                        # each window covers the interval [center - window_size, center + window_size]
-# # window_size = 0.5
-# print(window_size)
-# m = int((window_size * 2)/resol)+1                                              # grid size of each result vector of its center angle = number of steering vectors of each window, here m=101
-# print('m = {}'.format(m))
-# u = torch.zeros(len(centers), m, dtype = torch.float64)
-# A = torch.zeros(center_size, n, m, dtype = torch.cdouble).cpu()                 # dictionary matrices
-# A_H = torch.zeros(center_size, m, n, dtype = torch.cdouble).cpu()               # transpose of dictionary matrices
-#         # print('middle_index = {}'.format(middle_index))
-# for ct in range(len(centers)):
-#     print(centers[ct])
-#     [A[ct, :, :]] = ss_model.ULA_refine(n, resol, m, b1 = centers[ct] - window_size, b2 = centers[ct] + window_size)
-#     A_H[ct, :, :] = A[ct, :, :].conj().T
-
-
-# #### estimation ####
+# # #### estimation ####
 # import gc
-# A = A.to('cuda')
-# A_H = A_H.to('cuda')
-# samples_run = samples
 # x_pred = [0] * samples_run
-# q_pred = [0] * samples
-#   # est = [0] * samples
 # MSE = [0] * samples_run
 # theta = [0] * samples_run
-# spec_pred = [0] * samples_run
-# spec_true = [0] * samples_run
-# for i in range(samples_run):                                                    #r=r_2 * 6000 when k=1
+
+# for i in range(samples_run): #r=r_2 * 6000 when k=1
 #   print(i)
 #   print('true doa is {}'.format(x_dire[i]))
-#   r_tuning =  [20000, 15000, 10000, 300, 100, 90]
+#   r_tuning =  [20000, 15000, 10000, 300, 100, 90].to(device)
 #   MSE_tuning = [0] * len(r_tuning)
 #   for r in range(len(r_tuning)):
 #     print('r_tuning = {}'.format(r_tuning[r]))
