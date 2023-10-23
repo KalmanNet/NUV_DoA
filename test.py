@@ -43,75 +43,30 @@ A_H_batched = A_batched.transpose(1, 2).conj()
 y_mean = y_train.mean(dim=1) # generate y_mean by averaging l snapshots for each sample
 
 # #### estimation ####
-# Original version
-start = time.time()
-for r_tuning in r_t:
-    print('======================================')
-    print('r_tuning = {}'.format(r_tuning))
-    x_pred = [0] * samples_run
-    theta = [0] * samples_run
-    MSE = [0] * samples_run 
-    start1 = time.time()
-    for i in range(samples_run):
-        # NUV-SSR
-        [x_pred[i], iterations] = NUV_SSR(args, A, y_mean[i, :, 0], r=r_tuning)
-    end1 = time.time()
-    t1 = end1 - start1
-    # Print Run Time
-    print("NUV-SSR origin Run Time:", t1)
-
-    for i in range(samples_run):
-        # find peaks
-        peak_indices = utils.peak_finding(x_pred[i], args.k)
-        # convert to DoA
-        theta[i] = utils.convert_to_doa(peak_indices, args.m)  
-        # compute MSE
-        MSE[i] = utils.PMSE(theta[i], x_dire[i]) # mean square error for each sample     
-        print('MSE for {}th sample = {}'.format(i, MSE[i]))
-        print('------------------------------------------') 
-  
-    mean_MSE = sum(MSE) / len(MSE)
-    MSE_dB = 10 * (math.log10(mean_MSE))
-    print('averaged MSE in dB = {}'.format(MSE_dB))
-    MSE_linear = math.sqrt(mean_MSE)
-    print('averaged RMSE in linear = {}'.format(MSE_linear))
-    print('--------------------------------------------')
-
-end = time.time()
-t = end - start
-# Print Run Time
-print("Total Run Time:", t)
-
 # batched version
 start = time.time()
 for r_tuning in r_t:
     print('======================================')
     print('r_tuning = {}'.format(r_tuning))
-    x_pred = [0] * samples_run
-    theta = [0] * samples_run
-    MSE = [0] * samples_run 
     start1 = time.time()   
     # NUV-SSR batched
     [x_pred, iterations] = NUV_SSR_batched(args, A_batched, A_H_batched, y_mean, r_tuning)
     end1 = time.time()
     t1 = end1 - start1
     # Print Run Time
-    print("NUV-SSR origin Run Time:", t1)
+    print("NUV-SSR batched Run Time:", t1)
 
-    for i in range(samples_run):
-        # find peaks
-        peak_indices = utils.peak_finding(x_pred[i], args.k)
-        # convert to DoA
-        theta[i] = utils.convert_to_doa(peak_indices, args.m)  
-        # compute MSE
-        MSE[i] = utils.PMSE(theta[i], x_dire[i]) # mean square error for each sample     
-        print('MSE for {}th sample = {}'.format(i, MSE[i]))
-        print('------------------------------------------') 
+    # find peaks
+    peak_indices = utils.batch_peak_finding(x_pred, args.k)
+    # convert to DoA
+    theta = utils.batch_convert_to_doa(peak_indices, args.m)  
+    # compute MSE
+    MSE = utils.batched_permuted_mse(theta, x_dire) # mean square error for all samples   
   
-    mean_MSE = sum(MSE) / len(MSE)
-    MSE_dB = 10 * (math.log10(mean_MSE))
+    mean_MSE = torch.mean(MSE)
+    MSE_dB = 10 * (torch.log10(mean_MSE))
     print('averaged MSE in dB = {}'.format(MSE_dB))
-    MSE_linear = math.sqrt(mean_MSE)
+    MSE_linear = torch.sqrt(mean_MSE)
     print('averaged RMSE in linear = {}'.format(MSE_linear))
     print('--------------------------------------------')
 

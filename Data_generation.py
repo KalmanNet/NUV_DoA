@@ -25,14 +25,14 @@ class DataGenerator:
             # Shuffle the angles
             shuffled_angles = all_angles[torch.randperm(all_angles.size(0))]
 
-            selected_angles = []
+            selected_angles = torch.tensor([], device=self.device)
             for angle in shuffled_angles:
-                if all(torch.abs(angle - torch.tensor(selected_angles)) >= self.args.gap):
-                    selected_angles.append(angle.item())
+                if all(torch.abs(angle - selected_angles) >= self.args.gap):
+                    selected_angles = torch.cat((selected_angles, angle.unsqueeze(0)))
                     if len(selected_angles) == self.args.k:
                         break
             selected_angles.sort()
-            x_dire[sample_index] = torch.tensor(selected_angles)
+            x_dire[sample_index] = selected_angles
 
         return x_dire
     
@@ -122,12 +122,12 @@ class DataGenerator:
 
         x_true = self.nonco_signal_generator()
         
-        y_train = torch.zeros(self.args.sample, self.args.l, self.args.n, 1, dtype=torch.cfloat)
+        y_train = torch.zeros(self.args.sample, self.args.l, self.args.n, 1, dtype=torch.cfloat, device=self.device)
         
         for j in range(self.args.sample):
             for t in range(self.args.l):
-                er1 = torch.normal(mean=0.0, std=torch.sqrt(self.r2 / 2), size=(self.args.n,))
-                er2 = torch.normal(mean=0.0, std=torch.sqrt(self.r2 / 2), size=(self.args.n,))
+                er1 = torch.normal(mean=0.0, std=torch.sqrt(self.r2 / 2), size=(self.args.n,)).to(self.device)
+                er2 = torch.normal(mean=0.0, std=torch.sqrt(self.r2 / 2), size=(self.args.n,)).to(self.device)
 
                 y_train[j, t, :, 0] = STM_A[j].matmul(x_true[j, t, :, 0]) + er1 + er2 * 1j
                 
