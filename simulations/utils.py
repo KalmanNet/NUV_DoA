@@ -1,8 +1,32 @@
 import torch
+from scipy.signal import find_peaks
 import itertools 
 
+# find peaks 1D (known k)
+def peak_finding(u, k):
+  """
+  input: u, tensor of size [m]
+         k, number of output peaks
+  output: indices of the first k highest peaks
+  """
+  spectrum = torch.abs(u)
+  # Find all peaks and their properties
+  peaks, _ = find_peaks(spectrum)
 
-# find peaks 1D (known k), suport GPU
+  # If fewer peaks are found than k, raise an error
+  if len(peaks) < k:
+    raise ValueError('Fewer peaks found than k')
+  
+  # Get the heights from the properties dictionary
+  peak_heights = spectrum[peaks]
+  # Get the indices that would sort the peak heights in descending order
+  _, peak_height_indices = torch.topk(peak_heights, k)
+  # Get the indices of the first k highest peaks
+  peak_indices = peaks[peak_height_indices]
+
+  return peak_indices
+
+# batch version of peak finding 1D (known k)
 def batch_peak_finding(u, k):
     """
     input: u, tensor of size [batch size, m]
@@ -37,8 +61,18 @@ def batch_peak_finding(u, k):
 
     return batched_peak_indices
   
-
 # Convert to DoA
+def convert_to_doa(peak_indices, centers):
+    """
+    input: peak_indices, array of size [k]
+           centers,
+    output: doa, tensor of size [k]
+    """
+    doa = centers[peak_indices]
+    doa.sort()
+    return doa
+   
+# batch version of Convert to DoA
 def batch_convert_to_doa(peak_indices, m):
   """
   input: peak_indices, tensor of size [batch_size, k]
@@ -53,12 +87,35 @@ def batch_convert_to_doa(peak_indices, m):
 
   return doa
 
+# permuted MSE computation
+def permuted_mse(pred, DOA):
+    """
+    input: pred, tensor of size [k]
+           DOA, tensor of size [k]
+    output: permuted MSE
+    """
+    # Step 1: Generate all possible permutations of indices [0, 1, ..., k-1]
+    perms = all_permutations(len(pred))  # [k!, k]
+    
+    # Step 2: Use these permutations to reorder pred
+    permuted_preds = pred[perms]  # [k!, k]
+
+    # Step 3: Compute the MSE for each permutation
+    mse = torch.mean((permuted_preds - DOA)**2, dim=-1)  # [k!]
+
+    # Step 4: Find the minimum MSE
+    min_mse, _ = torch.min(mse, dim=-1)  # []
+
+    return min_mse
+
+
+
 
 # permuted MSE computation
 def all_permutations(length):
     """Return all permutations of a sequence of given length."""
     return torch.tensor(list(itertools.permutations(range(length))), dtype=torch.long)
-
+# batch version of permuted MSE computation
 def batched_permuted_mse(pred, DOA):
     batch_size, k = pred.shape
     device = pred.device

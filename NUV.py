@@ -44,7 +44,7 @@ def NUV_SSR(args, A, y, r):
    ### 3. MAP Estimator of the sparse signal###
    u = torch.diag(torch.square(q[1])) @ A_H @ W @ y
 
-   return [u, iterations]
+   return u, iterations
 
 
 def NUV_SSR_batched(args, A, A_H, y, r):   
@@ -94,6 +94,55 @@ def NUV_SSR_batched(args, A, A_H, y, r):
    U = torch.diag_embed(torch.square(q[:, -1, :]), offset=0, dim1=-2, dim2=-1) @ A_H @ W @ y
    U = torch.squeeze(U,2)
    
-   return [U, iterations]
+   return U, iterations
+
+
+def NUV_DoA(args, center_num, A, A_H, y,  r):
+   # Set up parameters
+   m = args.m_SF
+   n = args.n
+   l = args.l
+   middle_index = int(args.m_SF / 2)
+   max_iterations = args.max_iterations
+   convergence_threshold = args.convergence_threshold
+
+   id = torch.eye(n, dtype=torch.cfloat, device=A.device)   
+   id = id.reshape((1, n, n))
+   id_batch = id.repeat(center_num, 1, 1)
+
+   # 1. Initial Guess
+   q = args.q_init * torch.ones(center_num, 2, m, dtype=torch.cfloat, device=A.device)
+
+   # 2. EM Algorithm
+   iterations = max_iterations
+
+   for it in range(max_iterations):
+      q[:, 0, :] = q[:, 1, :]
+      
+      diag_squared_q = torch.diag_embed(torch.square(q[:, 0, :]), offset=0, dim1=-2, dim2=-1)
+      W_inv = A @ diag_squared_q @ A_H
+      W_inv = W_inv + (r / l) * id_batch
+
+      W = torch.linalg.inv(W_inv)
+
+      mean = torch.abs(diag_squared_q @ A_H @ W @ y)
+
+      M1 = torch.diag_embed(torch.pow(q[:, 0, :], 4), offset=0, dim1=-2, dim2=-1)
+      M2 = torch.diagonal(A_H @ W @ A, dim1=-2, dim2=-1)
+      M2 = M2.unsqueeze(-1)
+
+      variance = torch.abs(torch.pow(q[:, 0, :], 2) - torch.squeeze(torch.bmm(M1, M2)))
+
+      q[:, 1, :] = torch.sqrt(torch.square(mean) + variance)
+
+      if max(torch.linalg.norm(q[:, 0, :] - q[:, 1, :], dim=1)) < convergence_threshold:
+            iterations = it
+            break
+
+   # 3. MAP Estimator
+   U = abs(torch.diag_embed(torch.square(q[:, -1, :]), offset=0, dim1=-2, dim2=-1) @ A_H @ W @ y)
+   u = U[:, middle_index]
+
+   return u, iterations
 
 
